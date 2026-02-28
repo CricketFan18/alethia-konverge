@@ -6,8 +6,18 @@ from torchvision import models, transforms
 from PIL import Image, ExifTags
 import io
 
-# Import custom heatmap generator from utils.py
+# Import custom heatmap generator
 from utils import generate_ela_heatmap
+
+# Load environment variables
+load_dotenv()
+
+# Configure Cloudinary
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")
+)
 
 app = FastAPI(title="Authenticity Verifier - Enterprise API")
 
@@ -40,7 +50,7 @@ if os.path.exists(MODEL_PATH):
     classifier.load_state_dict(torch.load(MODEL_PATH, map_location=device))
     print("Local model weights loaded successfully.")
 else:
-    print(f"WARNING: '{MODEL_PATH}' not found. Serving with untrained random weights. Run train.py first!")
+    print(f"WARNING: '{MODEL_PATH}' not found. Serving with untrained random weights.")
 
 classifier = classifier.to(device)
 classifier.eval()
@@ -49,7 +59,8 @@ preprocess = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
 ])
 
 # ==========================================
@@ -58,14 +69,22 @@ preprocess = transforms.Compose([
 def extract_exif(img: Image.Image) -> dict:
     try:
         exif = img._getexif()
-        if not exif: return {"status": "Missing", "data": "No EXIF found (Common in AI/Edited images)."}
-        clean = {ExifTags.TAGS[k]: str(v) for k, v in exif.items() if k in ExifTags.TAGS}
+        if not exif:
+            return {
+                "status": "Missing",
+                "data": "No EXIF found (Common in AI/Edited images)."
+            }
+        clean = {
+            ExifTags.TAGS[k]: str(v)
+            for k, v in exif.items()
+            if k in ExifTags.TAGS
+        }
         return {"status": "Found", "data": clean}
-    except:
+    except Exception:
         return {"status": "Error", "data": "Failed to parse metadata."}
 
 # ==========================================
-# THE MASTER ENDPOINT
+# MASTER ENDPOINT (WITH CLOUDINARY)
 # ==========================================
 # FIX: Removed 'async' so FastAPI runs this blocking code in a background threadpool
 @app.post("/api/analyze")
@@ -80,7 +99,7 @@ def analyze_image_endpoint(file: UploadFile = File(...)):
         
         # AI Inference
         input_tensor = preprocess(img).unsqueeze(0).to(device)
-        
+
         with torch.no_grad():
             raw_output = classifier(input_tensor)
             prediction = torch.sigmoid(raw_output).item()
@@ -97,6 +116,9 @@ def analyze_image_endpoint(file: UploadFile = File(...)):
         
         return {
             "status": "success",
+            "source": {
+                "original_image_url": cloudinary_url
+            },
             "verdict": {
                 "label": label,
                 "confidence": confidence
@@ -106,7 +128,7 @@ def analyze_image_endpoint(file: UploadFile = File(...)):
                 "metadata": exif_data
             }
         }
-        
+
     except Exception as e:
         print(f"[CRITICAL ERROR] {e}")
         raise HTTPException(status_code=500, detail="Server failed to process the image.")
